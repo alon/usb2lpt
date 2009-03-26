@@ -12,7 +12,7 @@ lpt.write_one(0, 255) # turn on all data port (8 bits) pins
 
 Simple command line usage: (count from 0 to 255)
 
-for ((i=0;i<256;++i)); do ./play.py --out 0 $i; done
+for ((i=0;i<256;++i)); do sudo ./play.py --out 0 $i; done
 
 """
 
@@ -29,8 +29,10 @@ USB2LPT_VENDOR = 0x5348
 
 def get_device(vendorid):
     busses = usb.busses() # enumerate, takes a little while
-    device = sum([[y for y in x.devices if y.idVendor == vendorid] for x in busses], [])[0]
-    return device
+    devices = sum([[y for y in x.devices if y.idVendor == vendorid] for x in busses], [])
+    if len(devices) == 0:
+        return None
+    return devices[0]
 
 def get_interface(configuration, which_class):
     return sum([[i for i in ifs if i.interfaceClass == which_class] for ifs in configuration.interfaces], [])
@@ -42,8 +44,13 @@ class Usb2lpt(object):
     def __init__(self):
         self.init()
 
+    def look_for_device(self):
+        if self.device is None:
+            self.init()
+
     def init(self):
         self.device = get_device(USB2LPT_VENDOR)
+        if self.device is None: return
         self.configuration = self.device.configurations[0]
         self.interface = get_interface(self.configuration, VENDOR_CLASS)[0]
         self.out_ep = [ep for ep in self.interface.endpoints if ep.address < 128][0]
@@ -51,6 +58,7 @@ class Usb2lpt(object):
         self.handle = None
     
     def open_handle(self):
+        if self.device is None: return
         if self.handle is not None:
             try:
                 self.handle.releaseInterface()
@@ -71,7 +79,7 @@ class Usb2lpt(object):
             * 10 = set ECP configuration register "ECR"
         """
         self.open_handle()
-        self.handle.bulkWrite(self.out_ep.address, struct.pack('BB', a, b))
+        self.safe_bulkWrite(self.out_ep.address, struct.pack('BB', a, b))
 
     def read_one(self, a):
         """ The meaning of a:
@@ -85,8 +93,33 @@ class Usb2lpt(object):
             * 10 = read ECP Configuration Register "ECR" (e.g. FIFO state)
         """
         self.open_handle()
-        self.handle.bulkWrite(self.out_ep.address, struct.pack('B', a | 0x10))
-        return self.handle.bulkRead(self.in_ep.address, 1)
+        self.safe_bulkWrite(self.out_ep.address, struct.pack('B', a | 0x10))
+        # TODO: shouldn't read immediately, need to wait for URB from device.
+        # currently we get old output first, only later new output.
+        return self.safe_bulkRead(self.in_ep.address, 1)
+
+    def safe_something(self, meth, *args, **kw):
+        """ let's us work around people unplugging and replugging the device.
+        not really something a static config should care about (and might
+        be considered needlessly complex)
+
+        we assume the handle was openned - on catch we reopen it
+        """
+        if self.device is None: return
+        try:
+            meth(*args, **kw)
+        except usb.USBError:
+            # assume the device has gone bye bye - re-enumerate
+            self.init()
+            if self.device is None: return
+            self.open_handle()
+            meth(*args, **kw) # this time unprotected
+
+    def safe_bulkWrite(self, address, bytes):
+        self.safe_something(self.handle.bulkWrite, address, bytes)
+
+    def safe_bulkRead(self, address, num_bytes):
+        self.safe_something(self.handle.bulkRead, address, num_bytes)
 
     def write(self, pairs):
         self.write_raw(struct.pack('BB'*len(pairs), *sum(pairs, [])))
@@ -97,13 +130,14 @@ class Usb2lpt(object):
         self.open_handle()
         n = len(bytes_out)
         for start in xrange(0, n, 64):
-            self.handle.bulkWrite(self.out_ep.address, bytes_out[start:start+64])
+            self.safe_bulkWrite(self.out_ep.address, bytes_out[start:start+64])
         if num_in > 0:
             # TODO: does reading also have a limit of 64 bytes?
             return self.handle.bulkRead(self.in_ep.address, num_in)
         return None
 
     def reset(self):
+        if self.device is None: return
         handle = self.device.open()
         handle.reset()
         # invalidates the handle, need to re-enumerate and get device
