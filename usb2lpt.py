@@ -20,12 +20,15 @@ import struct
 
 import usb
 
-__all__ = ['open', 'Usb2lpt', 'USB2LPT_VENDOR']
+__all__ = ['open', 'Usb2lpt', 'USB2LPT_VENDOR', 'USB2LPTError']
 
 PRINTER_CLASS    = 0x07
 VENDOR_CLASS     = 0xff # This is the one we need for general purpose parallel port use
 
 USB2LPT_VENDOR = 0x5348
+
+class USB2LPTError(Exception):
+    pass
 
 def get_device(vendorid):
     busses = usb.busses() # enumerate, takes a little while
@@ -43,6 +46,8 @@ def open():
 class Usb2lpt(object):
     def __init__(self):
         self.init()
+        self.open_handle()
+        self.close_handle()
 
     def look_for_device(self):
         if self.device is None:
@@ -57,16 +62,22 @@ class Usb2lpt(object):
         self.in_ep = [ep for ep in self.interface.endpoints if ep.address >= 128][0]
         self.handle = None
     
-    def open_handle(self):
-        if self.device is None: return
+    def close_handle(self):
         if self.handle is not None:
             try:
                 self.handle.releaseInterface()
             except ValueError:
                 pass
+
+    def open_handle(self):
+        if self.device is None: return
+        self.close_handle()
         if self.handle is None:
             self.handle = self.device.open()
-            self.handle.claimInterface(self.interface)
+            try:
+                self.handle.claimInterface(self.interface)
+            except:
+                raise USB2LPTError("you don't have permissions on the usb device TODO_DEVICE_NAME")
 
     def write_one(self, a, b):
         """ A single output instruction. a determines address, b is contents.
